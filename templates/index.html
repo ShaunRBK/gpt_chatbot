@@ -17,12 +17,14 @@
           border-radius: 8px;
           box-shadow: 0 0 10px rgba(0,0,0,0.1);
         }
-        #chatbox {
+        #chatbox, #fileContent {
           border: 1px solid #ccc;
-          height: 400px;
+          height: 200px;
           overflow-y: auto;
           padding: 10px;
           margin-bottom: 10px;
+          white-space: pre-wrap;
+          background: #fdfdfd;
         }
         .message {
           margin: 5px 0;
@@ -55,6 +57,13 @@
     <textarea id="input" rows="3" placeholder="Type your message here..."></textarea>
     <br>
     <button onclick="sendMessage()">Send</button>
+
+    <hr>
+
+    <h2>Upload File</h2>
+    <input type="file" id="fileInput" accept=".pdf,.docx,.xlsx,.pptx">
+    <button onclick="uploadFile()">Upload</button>
+    <div id="fileContent"></div>
 </div>
 
 <script>
@@ -65,11 +74,10 @@
       msgDiv.className = "message " + role;
       msgDiv.textContent = content;
       chatbox.appendChild(msgDiv);
-      // Auto-scroll to the bottom
       chatbox.scrollTop = chatbox.scrollHeight;
     }
 
-    // Function to send the message to the backend
+    // Function to send a chat message to the backend
     async function sendMessage() {
       const inputField = document.getElementById("input");
       const message = inputField.value.trim();
@@ -80,9 +88,7 @@
       try {
         const response = await fetch("/chat", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message })
         });
         const data = await response.json();
@@ -93,6 +99,34 @@
         }
       } catch (error) {
         addMessage("Error: " + error, "assistant");
+      }
+    }
+
+    // Function to upload a file and display the extracted text
+    async function uploadFile() {
+      const fileInput = document.getElementById("fileInput");
+      if (fileInput.files.length === 0) {
+        alert("Please select a file to upload");
+        return;
+      }
+      const file = fileInput.files[0];
+      const formData = new FormData();
+      formData.append("file", file);
+
+      try {
+        const response = await fetch("/upload", {
+          method: "POST",
+          body: formData
+        });
+        const data = await response.json();
+        const fileContentDiv = document.getElementById("fileContent");
+        if (data.error) {
+          fileContentDiv.textContent = "Error: " + data.error;
+        } else {
+          fileContentDiv.textContent = data.text;
+        }
+      } catch (error) {
+        console.error("Error uploading file:", error);
       }
     }
 </script>
