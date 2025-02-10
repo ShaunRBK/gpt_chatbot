@@ -7,3 +7,4 @@ pandas==1.5.3
 openpyxl==3.1.2
 faiss-cpu
 numpy
+fpdf==1.7.2
