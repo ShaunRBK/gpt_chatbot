@@ -17,9 +17,9 @@
           border-radius: 8px;
           box-shadow: 0 0 10px rgba(0,0,0,0.1);
         }
-        #chatbox, #fileContent {
+        #chatbox {
           border: 1px solid #ccc;
-          height: 200px;
+          height: 300px;
           overflow-y: auto;
           padding: 10px;
           margin-bottom: 10px;
@@ -39,7 +39,7 @@
           background-color: #f1f0f0;
           text-align: left;
         }
-        textarea, input, select {
+        textarea {
           width: 100%;
           padding: 10px;
           box-sizing: border-box;
@@ -48,9 +48,17 @@
         button {
           padding: 10px 20px;
           margin-top: 5px;
+          margin-right: 5px;
         }
-        hr {
-          margin: 20px 0;
+        /* Optional: style for the file upload button */
+        #uploadBtn {
+          background-color: #007bff;
+          color: white;
+          border: none;
+          cursor: pointer;
+        }
+        #uploadBtn:hover {
+          background-color: #0056b3;
         }
     </style>
 </head>
@@ -58,38 +66,28 @@
 <div class="container">
     <h1>GPT-4o-mini Chatbot</h1>
     <div id="chatbox"></div>
-    <textarea id="input" rows="3" placeholder="Type your chat message here..."></textarea>
-    <button onclick="sendMessage()">Send Chat</button>
-
-    <hr>
-
-    <h2>Upload Document</h2>
-    <input type="file" id="fileInput" accept=".pdf,.docx,.xlsx,.pptx">
-    <button onclick="uploadFile()">Upload File</button>
-    <div id="fileContent"></div>
-
-    <hr>
-
-    <h2>Generate Document</h2>
-    <textarea id="docPrompt" rows="3" placeholder="Enter your document generation prompt here..."></textarea>
-    <select id="fileType">
-        <option value="docx">Microsoft Word (.docx)</option>
-        <option value="pptx">PowerPoint (.pptx)</option>
-        <option value="pdf">PDF (.pdf)</option>
-    </select>
-    <button onclick="generateDocument()">Generate Document</button>
+    <textarea id="input" rows="3" placeholder="Type your message here..."></textarea>
+    <div>
+        <button onclick="sendMessage()">Send</button>
+        <!-- The Upload File button triggers the hidden file input -->
+        <button id="uploadBtn" onclick="document.getElementById('fileInput').click()">Upload File</button>
+        <!-- Hidden file input element -->
+        <input type="file" id="fileInput" style="display:none" onchange="uploadFile()">
+    </div>
 </div>
 
 <script>
+    // Adds a message to the chatbox. Uses innerHTML to support clickable links.
     function addMessage(content, role) {
       const chatbox = document.getElementById("chatbox");
       const msgDiv = document.createElement("div");
       msgDiv.className = "message " + role;
-      msgDiv.textContent = content;
+      msgDiv.innerHTML = content;
       chatbox.appendChild(msgDiv);
       chatbox.scrollTop = chatbox.scrollHeight;
     }
 
+    // Sends the user message to the backend and processes the response.
     async function sendMessage() {
       const inputField = document.getElementById("input");
       const message = inputField.value.trim();
@@ -101,73 +99,49 @@
         const response = await fetch("/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: message })
+          body: JSON.stringify({ message })
         });
         const data = await response.json();
         if (data.error) {
           addMessage("Error: " + data.error, "assistant");
         } else {
-          addMessage("Bot: " + data.answer, "assistant");
+          let answer = data.answer;
+          // Convert any download URL (e.g. /download/...) to a clickable link.
+          const downloadRegex = /\/download\/[^\s]+/g;
+          answer = answer.replace(downloadRegex, function(url) {
+            return `<a href="${url}" target="_blank">Download Document</a>`;
+          });
+          addMessage("Bot: " + answer, "assistant");
         }
       } catch (error) {
         addMessage("Error: " + error, "assistant");
       }
     }
 
+    // Uploads a file via the /upload endpoint.
     async function uploadFile() {
       const fileInput = document.getElementById("fileInput");
-      if (fileInput.files.length === 0) {
-        alert("Please select a file to upload");
+      if (!fileInput.files || fileInput.files.length === 0) {
+        alert("Please select a file.");
         return;
       }
       const file = fileInput.files[0];
       const formData = new FormData();
       formData.append("file", file);
-
       try {
         const response = await fetch("/upload", {
           method: "POST",
           body: formData
         });
         const data = await response.json();
-        const fileContentDiv = document.getElementById("fileContent");
         if (data.error) {
-          fileContentDiv.textContent = "Error: " + data.error;
+          addMessage("Error uploading file: " + data.error, "assistant");
         } else {
-          fileContentDiv.textContent = data.text;
+          addMessage("File uploaded and processed.", "assistant");
         }
       } catch (error) {
-        console.error("Error uploading file:", error);
+        addMessage("Error uploading file: " + error, "assistant");
       }
-    }
-
-    function generateDocument() {
-      const prompt = document.getElementById("docPrompt").value.trim();
-      const fileType = document.getElementById("fileType").value;
-      if (!prompt) {
-        alert("Please enter a prompt for document generation.");
-        return;
-      }
-      // Create a hidden form and submit it to trigger file download
-      const form = document.createElement("form");
-      form.method = "POST";
-      form.action = "/generate_document";
-      form.style.display = "none";
-
-      // Create input fields for prompt and fileType
-      const promptInput = document.createElement("input");
-      promptInput.name = "prompt";
-      promptInput.value = prompt;
-      form.appendChild(promptInput);
-
-      const fileTypeInput = document.createElement("input");
-      fileTypeInput.name = "file_type";
-      fileTypeInput.value = fileType;
-      form.appendChild(fileTypeInput);
-
-      document.body.appendChild(form);
-      form.submit();
-      document.body.removeChild(form);
     }
 </script>
 </body>

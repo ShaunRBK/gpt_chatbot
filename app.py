@@ -1,35 +1,35 @@
 import os
+import uuid
+import json
 from io import BytesIO
 
 from openai import OpenAI
 from flask import Flask, render_template, request, jsonify, send_file
 
-# Additional imports for file processing
+# Additional imports for file processing and document generation
 import PyPDF2
 import docx
 import pandas as pd
 from pptx import Presentation
-
-# Additional import for PDF generation
 from fpdf import FPDF
 
-# For vector database (RAG) functionality (from previous steps)
+# For RAG (retrieval-augmented generation)
 import faiss
 import numpy as np
 
-# Initialize the OpenAI client using the migrated approach
+# Initialize the OpenAI client (using your migrated code)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Initialize Flask
 app = Flask(__name__)
 
 # -----------------------------
-# Global variables used in the app
+# Global Variables
 # -----------------------------
 faiss_index = None          # FAISS index for vector search
-chunk_texts = []            # List mapping each FAISS vector to its corresponding text chunk
-full_document_text = None   # Full text of the uploaded document (for fallback)
-# (Note: In a production system, consider using sessions or a database rather than globals.)
+chunk_texts = []            # Mapping: each vector in FAISS corresponds to a text chunk
+full_document_text = None   # Full text from an uploaded document (for fallback)
+# Note: In production, consider using sessions or a database instead of globals.
 
 # -----------------------------
 # Helper Functions for File Extraction and RAG
@@ -37,13 +37,13 @@ full_document_text = None   # Full text of the uploaded document (for fallback)
 
 def extract_text_from_pdf(file):
     """
-    Extracts and returns text from a PDF file.
+    Extract text from a PDF file.
 
     Args:
-      file (FileStorage): An uploaded PDF file.
+      file (FileStorage): The uploaded PDF file.
 
     Returns:
-      str: The extracted text from the PDF.
+      str: The extracted text.
     """
     file.seek(0)
     reader = PyPDF2.PdfReader(file)
@@ -56,13 +56,13 @@ def extract_text_from_pdf(file):
 
 def extract_text_from_docx(file):
     """
-    Extracts and returns text from a DOCX (Microsoft Word) file.
+    Extract text from a DOCX (Word) file.
 
     Args:
-      file (FileStorage): An uploaded DOCX file.
+      file (FileStorage): The uploaded DOCX file.
 
     Returns:
-      str: The extracted text from the Word document.
+      str: The extracted text.
     """
     file.seek(0)
     doc = docx.Document(file)
@@ -73,13 +73,13 @@ def extract_text_from_docx(file):
 
 def extract_text_from_excel(file):
     """
-    Extracts and returns text from an Excel file by converting its content to a string.
+    Extract text from an Excel file by converting its content to a string.
 
     Args:
-      file (FileStorage): An uploaded Excel file.
+      file (FileStorage): The uploaded Excel file.
 
     Returns:
-      str: The content of the Excel file as a string, or an error message if reading fails.
+      str: The content of the Excel file as text.
     """
     file.seek(0)
     try:
@@ -90,13 +90,13 @@ def extract_text_from_excel(file):
 
 def extract_text_from_pptx(file):
     """
-    Extracts and returns text from a PowerPoint (.pptx) file.
+    Extract text from a PowerPoint file.
 
     Args:
-      file (FileStorage): An uploaded PowerPoint file.
+      file (FileStorage): The uploaded PPTX file.
 
     Returns:
-      str: The extracted text from the presentation.
+      str: The extracted text.
     """
     file.seek(0)
     prs = Presentation(file)
@@ -109,11 +109,11 @@ def extract_text_from_pptx(file):
 
 def chunk_text(text, chunk_size=500):
     """
-    Splits the provided text into smaller chunks based on the specified number of words.
+    Splits a long text into chunks of approximately chunk_size words.
 
     Args:
-      text (str): The full text to be chunked.
-      chunk_size (int): The maximum number of words per chunk (default is 500).
+      text (str): The full text.
+      chunk_size (int): Maximum words per chunk.
 
     Returns:
       list[str]: A list of text chunks.
@@ -127,24 +127,23 @@ def chunk_text(text, chunk_size=500):
 
 def create_vector_store(text):
     """
-    Chunks the provided text, computes embeddings for each chunk using OpenAI's embedding model,
-    and builds a FAISS vector index for retrieval.
+    Build a vector store (using FAISS) from the given text.
 
-    Also stores the full text for fallback purposes.
+    The text is chunked, each chunk is embedded via OpenAI's embeddings, and then
+    stored in a FAISS index. The full text is also saved for fallback.
 
     Args:
-      text (str): The full text to process.
+      text (str): The full document text.
 
     Effects:
-      Updates global variables: 'faiss_index', 'chunk_texts', and 'full_document_text'.
+      Updates globals: 'faiss_index', 'chunk_texts', 'full_document_text'.
     """
     global faiss_index, chunk_texts, full_document_text
     chunks = chunk_text(text)
-    # The embedding dimension for text-embedding-ada-002 is 1536.
-    d = 1536
+    d = 1536  # Embedding dimension for text-embedding-ada-002
     index = faiss.IndexFlatL2(d)
     embeddings = []
-    chunk_texts = []  # Reset the list of chunks
+    chunk_texts = []  # Reset chunks
     for chunk in chunks:
         try:
             response = client.embeddings.create(model="text-embedding-ada-002", input=chunk)
@@ -154,22 +153,21 @@ def create_vector_store(text):
         except Exception as e:
             print(f"Error computing embedding for a chunk: {e}")
     if embeddings:
-        embeddings_np = np.vstack(embeddings)  # Shape: (num_chunks, d)
+        embeddings_np = np.vstack(embeddings)
         index.add(embeddings_np)
         faiss_index = index
-    # Save the full text for fallback if retrieval yields no results.
-    full_document_text = text
+    full_document_text = text  # Save full text for fallback
 
 def retrieve_relevant_chunks(query, top_k=5):
     """
-    Computes the embedding for the query and retrieves the top_k most similar text chunks from the FAISS index.
+    Retrieve the top_k text chunks from the vector store most relevant to the query.
 
     Args:
-      query (str): The user's query.
-      top_k (int): Number of top similar chunks to retrieve (default is 5).
+      query (str): The user query.
+      top_k (int): The number of top chunks to return.
 
     Returns:
-      list[str]: A list of relevant text chunks. If no chunks are found, returns the full document text.
+      list[str]: Relevant text chunks. If none found, returns the full document text.
     """
     global faiss_index, chunk_texts, full_document_text
     if faiss_index is None:
@@ -182,7 +180,6 @@ def retrieve_relevant_chunks(query, top_k=5):
         for idx in indices[0]:
             if idx < len(chunk_texts):
                 relevant_chunks.append(chunk_texts[idx])
-        # Fallback: if no relevant chunks are found, use the full document text.
         if not relevant_chunks and full_document_text:
             relevant_chunks = [full_document_text]
         return relevant_chunks
@@ -196,17 +193,16 @@ def retrieve_relevant_chunks(query, top_k=5):
 
 def generate_docx(text):
     """
-    Generates a Microsoft Word (.docx) document containing the provided text.
+    Generate a DOCX document containing the provided text.
 
     Args:
-      text (str): The content to be included in the document.
+      text (str): The document content.
 
     Returns:
-      BytesIO: A stream containing the generated DOCX file.
+      BytesIO: Stream containing the DOCX file.
     """
     document = docx.Document()
     document.add_heading("Generated Document", level=1)
-    # Add the content as paragraphs.
     for paragraph in text.split("\n"):
         document.add_paragraph(paragraph)
     output = BytesIO()
@@ -216,22 +212,19 @@ def generate_docx(text):
 
 def generate_pptx(text):
     """
-    Generates a PowerPoint (.pptx) presentation containing the provided text.
+    Generate a PPTX presentation containing the provided text.
 
     Args:
-      text (str): The content to be included in the presentation.
+      text (str): The content for the presentation.
 
     Returns:
-      BytesIO: A stream containing the generated PPTX file.
+      BytesIO: Stream containing the PPTX file.
     """
     presentation = Presentation()
-    slide_layout = presentation.slide_layouts[1]  # Use the "Title and Content" layout.
+    slide_layout = presentation.slide_layouts[1]
     slide = presentation.slides.add_slide(slide_layout)
-    # Set the slide title.
     slide.shapes.title.text = "Generated Presentation"
-    # Add the content in the content placeholder.
-    content_placeholder = slide.placeholders[1]
-    content_placeholder.text = text
+    slide.placeholders[1].text = text
     output = BytesIO()
     presentation.save(output)
     output.seek(0)
@@ -239,27 +232,41 @@ def generate_pptx(text):
 
 def generate_pdf(text):
     """
-    Generates a PDF document containing the provided text.
+    Generate a PDF document containing the provided text.
 
     Args:
-      text (str): The content to be included in the PDF.
+      text (str): The document content.
 
     Returns:
-      BytesIO: A stream containing the generated PDF file.
+      BytesIO: Stream containing the PDF file.
     """
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
-    # Split the text into lines to add via multi_cell.
     for line in text.split("\n"):
         pdf.multi_cell(0, 10, line)
-    output = BytesIO()
-    pdf.output(dest="S").encode("latin1")  # Ensure proper encoding for the PDF output
-    # Instead of writing to a file, we get the PDF as a byte string.
     pdf_bytes = pdf.output(dest="S").encode("latin1")
-    output.write(pdf_bytes)
+    output = BytesIO(pdf_bytes)
     output.seek(0)
     return output
+
+def store_file_temporarily(file_stream, ext):
+    """
+    Store a file stream in temporary storage and return a unique download URL.
+
+    Args:
+      file_stream (BytesIO): The file stream.
+      ext (str): The file extension (e.g., 'docx', 'pptx', 'pdf').
+
+    Returns:
+      str: The relative download URL for the stored file.
+    """
+    os.makedirs("temp_files", exist_ok=True)
+    temp_filename = f"{uuid.uuid4()}.{ext}"
+    temp_path = os.path.join("temp_files", temp_filename)
+    with open(temp_path, "wb") as f:
+        f.write(file_stream.read())
+    return f"/download/{temp_filename}"
 
 # -----------------------------
 # Flask Endpoints
@@ -275,32 +282,102 @@ def index():
 @app.route("/chat", methods=["POST"])
 def chat():
     """
-    Processes a chat message from the user. Retrieves any relevant document context (via RAG)
-    and uses it to build a conversation prompt for the LLM.
+    Handles user messages from the main prompt.
+
+    If the LLM detects a document generation request, it returns a function call
+    with structured JSON. The backend then generates the document file, stores it temporarily,
+    and returns a download link.
+
+    Otherwise, it returns a normal chat answer.
 
     Returns:
-      JSON: The LLM's answer.
+      JSON: A response with either a chat answer or a download link.
     """
     data = request.get_json()
     user_message = data.get("message")
     if not user_message:
         return jsonify({"error": "No message provided"}), 400
+
     try:
-        # Retrieve the most relevant document chunks for the query.
+        # Build conversation context.
+        messages = [
+            {"role": "system", "content": (
+                "You are a helpful assistant. If a user's request indicates a need to generate a document "
+                "(for example, a Word document, PowerPoint, or PDF), respond by calling the function "
+                "generate_document with a JSON object containing 'file_type' (one of 'docx', 'pptx', 'pdf') "
+                "and 'document_content' (the text for the document). Otherwise, answer normally."
+            )}
+        ]
+        # (Optional) Add retrieval-based context if available.
         relevant_chunks = retrieve_relevant_chunks(user_message, top_k=5)
         context_text = "\n\n".join(relevant_chunks)
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-        ]
         if context_text:
             messages.append({"role": "system", "content": f"Relevant document context:\n{context_text}"})
         messages.append({"role": "user", "content": user_message})
+
+        # Define function for document generation.
+        functions = [{
+            "name": "generate_document",
+            "description": (
+                "Generates a document. The output should be a JSON with two keys: "
+                "'file_type' (one of ['docx', 'pptx', 'pdf']) and "
+                "'document_content' (the text content for the document)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_type": {"type": "string", "enum": ["docx", "pptx", "pdf"]},
+                    "document_content": {"type": "string", "description": "The text content for the document."}
+                },
+                "required": ["file_type", "document_content"]
+            }
+        }]
+
+        # Call the chat API with function calling enabled.
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages
+            messages=messages,
+            functions=functions,
+            function_call="auto"  # Let the model decide if a function call is needed.
         )
-        answer = response.choices[0].message.content.strip()
-        return jsonify({"answer": answer})
+
+        message_response = response.choices[0].message
+
+        # Convert the message to a dictionary if it isn’t one already.
+        if hasattr(message_response, "to_dict"):
+            message_response = message_response.to_dict()
+
+        # Check if the assistant decided to call the generate_document function.
+        if message_response.get("function_call"):
+            # Parse function call arguments.
+            function_call = message_response["function_call"]
+            args = json.loads(function_call.get("arguments", "{}"))
+            file_type = args.get("file_type")
+            document_content = args.get("document_content")
+            if not file_type or not document_content:
+                return jsonify({"answer": "Failed to parse document generation parameters."})
+            # Generate the document file using the appropriate helper.
+            if file_type == "docx":
+                file_stream = generate_docx(document_content)
+                ext = "docx"
+            elif file_type == "pptx":
+                file_stream = generate_pptx(document_content)
+                ext = "pptx"
+            elif file_type == "pdf":
+                file_stream = generate_pdf(document_content)
+                ext = "pdf"
+            else:
+                return jsonify({"answer": "Unsupported file type in document generation."})
+
+            # Store the generated file temporarily and get a download URL.
+            download_url = store_file_temporarily(file_stream, ext)
+
+            answer = f"Document generated. You can download it here: {download_url}"
+            return jsonify({"answer": answer})
+        else:
+            # Regular chat answer.
+            answer = message_response.get("content")
+            return jsonify({"answer": answer})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -308,7 +385,7 @@ def chat():
 def upload():
     """
     Handles file uploads. Extracts text from the uploaded file (PDF, DOCX, XLSX, or PPTX),
-    then builds a vector store (using FAISS) and stores the full document text for retrieval.
+    builds a vector store (for RAG), and stores the full document text.
 
     Returns:
       JSON: The extracted text or an error message.
@@ -335,72 +412,25 @@ def upload():
     else:
         return jsonify({"error": "Unsupported file type"}), 400
 
-    # Build the vector store from the extracted text.
     create_vector_store(text)
-
     return jsonify({"text": text})
 
-@app.route("/generate_document", methods=["POST"])
-def generate_document():
+@app.route("/download/<filename>")
+def download_file(filename):
     """
-    Generates a document based on the user's prompt and desired file format.
+    Serves a file from temporary storage for download.
 
-    Expects either JSON data or form data with:
-      - prompt (str): The instruction or topic for the write-up.
-      - file_type (str): The desired file format ("docx", "pptx", or "pdf").
+    Args:
+      filename (str): The name of the file to download.
 
     Returns:
-      A downloadable file (with appropriate MIME type and filename) generated by the LLM.
+      The file as an attachment, or a 404 if not found.
     """
-    # Accept JSON if provided, otherwise fallback to form data.
-    if request.is_json:
-        data = request.get_json()
+    file_path = os.path.join("temp_files", filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, as_attachment=True)
     else:
-        data = request.form
-
-    prompt = data.get("prompt")
-    file_type = data.get("file_type", "docx").lower()
-
-    if not prompt:
-        return jsonify({"error": "No prompt provided"}), 400
-
-    try:
-        # Call the LLM to generate content based on the prompt.
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
-        ]
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages
-        )
-        document_text = response.choices[0].message.content.strip()
-
-        # Generate the file in the requested format.
-        if file_type == "docx":
-            file_stream = generate_docx(document_text)
-            mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            file_ext = "docx"
-        elif file_type == "pptx":
-            file_stream = generate_pptx(document_text)
-            mime_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-            file_ext = "pptx"
-        elif file_type == "pdf":
-            file_stream = generate_pdf(document_text)
-            mime_type = "application/pdf"
-            file_ext = "pdf"
-        else:
-            return jsonify({"error": "Unsupported file type requested."}), 400
-
-        # Return the generated file for download.
-        return send_file(
-            file_stream,
-            mimetype=mime_type,
-            as_attachment=True,
-            download_name=f"generated_document.{file_ext}"
-        )
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return "File not found", 404
 
 if __name__ == "__main__":
     app.run(debug=True)
