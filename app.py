@@ -4,7 +4,7 @@ import json
 from io import BytesIO
 import base64
 
-from openai import OpenAI
+from openai import OpenAI, api_key
 from flask import Flask, render_template, request, jsonify, send_file
 
 # Use a non-interactive backend for Matplotlib
@@ -23,8 +23,17 @@ from fpdf import FPDF
 import faiss
 import numpy as np
 
+# API key
+def load_api_key(json_path: str) -> str:
+    """
+    Load the OpenAI API key from a JSON file.
+    """
+    with open(json_path, 'r') as file:
+        data = json.load(file)
+    return data["openai_api_key"]
+
 # Initialize the OpenAI client (using your migrated code)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=load_api_key("config.json"))
 
 # Initialize Flask
 app = Flask(__name__)
@@ -158,8 +167,8 @@ def chunk_text(text, chunk_size=500):
 
 def create_vector_store(text):
     """
-    Chunks the provided text, computes embeddings for each chunk using OpenAI's embedding model,
-    and builds a FAISS vector index for retrieval.
+    Chunks the provided text, computes normalized embeddings for each chunk using OpenAI's embedding model,
+    and builds a FAISS vector index (using inner-product similarity, equivalent to cosine similarity if normalized).
 
     Also stores the full text for fallback.
 
@@ -172,47 +181,57 @@ def create_vector_store(text):
     global faiss_index, chunk_texts, full_document_text
     chunks = chunk_text(text)
     d = 1536  # Embedding dimension for text-embedding-ada-002
-    index = faiss.IndexFlatL2(d)
     embeddings = []
     chunk_texts = []  # Reset the list of chunks
     for chunk in chunks:
         try:
             response = client.embeddings.create(model="text-embedding-ada-002", input=chunk)
             embedding = np.array(response.data[0].embedding, dtype='float32')
+            # Normalize the embedding vector
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
             embeddings.append(embedding)
             chunk_texts.append(chunk)
         except Exception as e:
             print(f"Error computing embedding for a chunk: {e}")
     if embeddings:
-        embeddings_np = np.vstack(embeddings)
-        index.add(embeddings_np)
-        faiss_index = index
+        embeddings_np = np.vstack(embeddings)  # Shape: (num_chunks, d)
+        index_emb = faiss.IndexFlatIP(d)  # Use inner product (works as cosine similarity with normalized vectors)
+        index_emb.add(embeddings_np)
+        faiss_index = index_emb
     full_document_text = text
 
-def retrieve_relevant_chunks(query, top_k=5):
+def retrieve_relevant_chunks(query, top_k=5, similarity_threshold=0.6):
     """
-    Computes the embedding for the query and retrieves the top_k most similar text chunks from the FAISS index.
+    Computes the normalized embedding for the query and retrieves the top_k most similar text chunks
+    from the FAISS index. Only includes chunks whose similarity score meets or exceeds the threshold.
 
     Args:
       query (str): The user query.
-      top_k (int): Number of top similar chunks to retrieve (default is 5).
+      top_k (int): Number of top similar chunks to attempt to retrieve (default is 5).
+      similarity_threshold (float): Minimum cosine similarity (0 to 1) required to include a chunk.
 
     Returns:
-      list[str]: Relevant text chunks. If none found, returns the full document text.
+      list[str]: A list of relevant text chunks. If none meet the threshold, returns an empty list.
     """
     global faiss_index, chunk_texts, full_document_text
     if faiss_index is None:
         return []
     try:
         response = client.embeddings.create(model="text-embedding-ada-002", input=query)
-        query_embedding = np.array(response.data[0].embedding, dtype='float32').reshape(1, -1)
-        distances, indices = faiss_index.search(query_embedding, top_k)
+        query_embedding = np.array(response.data[0].embedding, dtype='float32')
+        # Normalize query embedding
+        norm = np.linalg.norm(query_embedding)
+        if norm > 0:
+            query_embedding = query_embedding / norm
+        # Search the index using inner-product similarity.
+        # For normalized vectors, higher values (up to 1) mean more similar.
+        scores, indices = faiss_index.search(query_embedding.reshape(1, -1), top_k)
         relevant_chunks = []
-        for idx in indices[0]:
-            if idx < len(chunk_texts):
+        for score, idx in zip(scores[0], indices[0]):
+            if score >= similarity_threshold:
                 relevant_chunks.append(chunk_texts[idx])
-        if not relevant_chunks and full_document_text:
-            relevant_chunks = [full_document_text]
         return relevant_chunks
     except Exception as e:
         print(f"Error retrieving relevant chunks: {e}")
@@ -398,21 +417,22 @@ def chat():
         messages = [
             {"role": "system", "content": (
                 "You are a helpful assistant. "
-                "If the user's request indicates a need to generate a document "
-                "(for example, a Word document, PowerPoint, or PDF), respond by calling the function "
-                "generate_document with a JSON object containing 'file_type' and 'document_content'. "
-                "If the user's request is about data analysis of an uploaded Excel/CSV file, call the function "
-                "analyze_data with a JSON object containing 'query'. "
-                "For Excel files with multiple sheets, the user can include the sheet name in their query "
-                "(for example, 'use sheet SalesData'). "
-                "Otherwise, answer normally."
+                "If the user's request explicitly asks to generate a new document (for example, 'create a report', "
+                "'generate a Word file', etc.), then call the function generate_document with the appropriate JSON payload. "
+                "If the user's request is about data analysis (for example, 'analyze my data', 'show me a plot', etc.), "
+                "then call the function analyze_data with the appropriate JSON payload. "
+                "However, if the user asks you to proofread, review, or check an uploaded document, provide your feedback "
+                "as plain text without generating a new file."
             )}
         ]
-        # (Optional) Add retrieval-based context if available.
-        relevant_chunks = retrieve_relevant_chunks(user_message, top_k=5)
-        context_text = "\n\n".join(relevant_chunks)
-        if context_text:
-            messages.append({"role": "system", "content": f"Relevant document context:\n{context_text}"})
+        # Always retrieve relevant chunks from the uploaded document (if any).
+        retrieved_chunks = retrieve_relevant_chunks(user_message, top_k=5, similarity_threshold=0.6)
+        if retrieved_chunks:
+            context_text = "\n\n".join(retrieved_chunks)
+            messages.append({
+                "role": "system",
+                "content": f"Relevant document context:\n{context_text}"
+            })
         messages.append({"role": "user", "content": user_message})
 
         # Prepare function definitions.
